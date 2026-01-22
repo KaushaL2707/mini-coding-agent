@@ -1,0 +1,14 @@
+# Core dependencies
+sentence-transformers>=2.2.0
+numpy>=1.21.0
+
+# Vector store (optional - falls back to numpy if not installed)
+faiss-cpu>=1.7.0
+
+# LLM providers (install the one you'll use)
+openai>=1.0.0
+# anthropic>=0.18.0
+# groq>=0.4.0
+
+# Optional: for better progress bars
+tqdm>=4.65.0
