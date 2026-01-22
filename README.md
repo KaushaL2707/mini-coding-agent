@@ -222,48 +222,6 @@ When suggesting fixes:
 """
 ```
 
----
-
-## 🛣️ Roadmap
-
-- [x] Repository ingestion & chunking
-- [x] Vector embeddings with FAISS
-- [x] Semantic code search
-- [x] Multi-provider LLM support
-- [x] CLI with interactive mode
-- [ ] Auto-apply patches
-- [ ] Run tests and iterate on failures
-- [ ] JavaScript/TypeScript AST parsing
-- [ ] Conversation memory
-- [ ] VS Code extension
-
----
-
-## 🤝 Contributing
-
-Contributions are welcome! Some ideas:
-
-- **Better chunking** for more languages (AST-based)
-- **Caching** for LLM responses
-- **Streaming** output for long responses
-- **Web UI** with FastAPI/Streamlit
-
----
-
-## 📄 License
-
-MIT License - feel free to use this for learning and building!
-
----
-
-## 🙏 Acknowledgments
-
-Built to understand how modern coding agents work. Inspired by:
-- [Cursor](https://cursor.sh/)
-- [GitHub Copilot](https://github.com/features/copilot)
-- [Sourcegraph Cody](https://sourcegraph.com/cody)
-
----
 
 <p align="center">
   <b>⭐ Star this repo if you learned something!</b>
