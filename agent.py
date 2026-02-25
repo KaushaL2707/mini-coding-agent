@@ -419,8 +419,8 @@ Examples:
     parser.add_argument(
         "--index-name",
         type=str,
-        default="default",
-        help="Name for the vector store index (default: 'default')",
+        default=None,
+        help="Name for the vector store index (default: auto from repo folder name)",
     )
 
     args = parser.parse_args()
@@ -428,15 +428,19 @@ Examples:
     # Resolve repo path
     repo_path = str(Path(args.repo).resolve())
 
+    # Auto-derive index name from the repo folder name if not provided
+    index_name = args.index_name or Path(repo_path).name or "default"
+    print(f"📦 Index: {index_name}")
+
     # Create agent
     agent = CodingAgent(
         repo_path=repo_path,
-        index_name=args.index_name,
+        index_name=index_name,
         llm_provider=args.provider,
     )
 
     # Index the repo
-    if args.reindex or not agent.retriever.load_index(args.index_name):
+    if args.reindex or not agent.retriever.load_index(index_name):
         if not agent.index(force=args.reindex):
             sys.exit(1)
     else:
