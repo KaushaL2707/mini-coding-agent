@@ -84,6 +84,10 @@ class CodingAgent:
         self.llm = LLM(provider=llm_provider)
         self.indexed = False
 
+        # Conversation memory (persists across tasks in a session)
+        self.session_history = []  # [{"task": str, "answer": str, "tools_used": [str]}]
+        self.max_history_chars = 6000  # Keep history within model context limits
+
         # Set up tools
         self.tools = create_default_tools()
 
@@ -100,6 +104,40 @@ class CodingAgent:
         if not self.indexed:
             return "Error: Repository not indexed yet. Run /index first."
         return self.retriever.retrieve_as_context(query)
+
+    def _build_history_context(self) -> str:
+        """Build a summary of previous tasks for the LLM's context."""
+        if not self.session_history:
+            return ""
+
+        parts = ["## Conversation History (previous tasks in this session)\n"]
+        total_chars = 0
+
+        # Include recent history, trimming from the oldest if too long
+        for entry in reversed(self.session_history):
+            summary = f"**User task:** {entry['task']}\n"
+            if entry.get('tools_used'):
+                summary += f"Tools used: {', '.join(entry['tools_used'])}\n"
+            # Truncate long answers in history
+            answer = entry['answer']
+            if len(answer) > 500:
+                answer = answer[:500] + "... [truncated]"
+            summary += f"**Agent answer:** {answer}\n---\n"
+
+            if total_chars + len(summary) > self.max_history_chars:
+                break
+            parts.insert(1, summary)  # Insert after header, keeping chronological order
+            total_chars += len(summary)
+
+        if len(parts) <= 1:
+            return ""  # Nothing fit
+
+        return "\n".join(parts)
+
+    def clear_history(self):
+        """Clear the conversation history."""
+        self.session_history.clear()
+        print("🧹 Conversation history cleared.")
 
     # ------------------------------------------------------------------
     # Indexing
@@ -235,37 +273,73 @@ class CodingAgent:
         )
 
         # ── Step 3: Agent loop ──
-        conversation = f"User task: {prompt}"
+        # Include conversation history for follow-up awareness
+        history_context = self._build_history_context()
+        if history_context:
+            conversation = f"{history_context}\n\nCurrent task: {prompt}"
+        else:
+            conversation = f"User task: {prompt}"
+
+        tools_used = []  # Track tools used in this task
 
         for step in range(1, MAX_ITERATIONS + 1):
             print(f"\n{'─'*60}")
             print(f"🔄 Step {step}/{MAX_ITERATIONS}")
             print(f"{'─'*60}")
 
-            # Call LLM
-            response = self.llm.provider.generate(conversation, system_prompt)
-
-            # Display the agent's thought
-            if "THOUGHT:" in response:
-                thought = response.split("THOUGHT:", 1)[1]
-                # Extract just the thought (before ACTION or FINAL_ANSWER)
-                for marker in ["ACTION:", "FINAL_ANSWER:"]:
-                    if marker in thought:
-                        thought = thought.split(marker, 1)[0]
-                        break
-                print(f"💭 {thought.strip()}")
+            # Stream LLM response (tokens appear in real-time)
+            response = ""
+            sys.stdout.write("   ")
+            sys.stdout.flush()
+            for token in self.llm.provider.generate_stream(conversation, system_prompt):
+                sys.stdout.write(token)
+                sys.stdout.flush()
+                response += token
+            print()  # newline after streaming
 
             # Parse the response
             result_type, value, args = self._parse_response(response)
 
             if result_type == "answer":
                 print(f"\n✅ Agent completed in {step} step(s)")
+                # Save to session history
+                self.session_history.append({
+                    "task": prompt,
+                    "answer": value,
+                    "tools_used": tools_used,
+                })
                 return value
 
             elif result_type == "action":
                 # Show tool call
                 args_display = json.dumps(args, indent=2) if args else "{}"
                 print(f"🔧 Tool: {value}({args_display})")
+                tools_used.append(value)
+
+                # Check if tool requires user confirmation
+                tool = self.tools.get(value)
+                if tool and tool.requires_confirmation:
+                    # Show what's about to happen
+                    if value == "write_file":
+                        print(f"⚠️  About to write to: {args.get('path', '?')}")
+                    elif value == "run_command":
+                        print(f"⚠️  About to run: {args.get('command', '?')}")
+
+                    try:
+                        confirm = input("   Approve? [y/n]: ").strip().lower()
+                    except (EOFError, KeyboardInterrupt):
+                        confirm = "n"
+
+                    if confirm not in ("y", "yes"):
+                        tool_result = f"User declined this action."
+                        print("   ❌ Declined")
+
+                        conversation += (
+                            f"\n\nAssistant:\n{response}"
+                            f"\n\nObservation: User declined the {value} action. "
+                            f"Find an alternative approach or provide your FINAL_ANSWER with the suggested changes instead."
+                        )
+                        continue
 
                 # Execute the tool
                 tool_result = self.tools.execute(value, args)
@@ -294,10 +368,14 @@ class CodingAgent:
 
         # Exhausted iterations
         print(f"\n⚠️ Reached max steps ({MAX_ITERATIONS})")
-        return (
-            "I reached the maximum number of steps. "
-            "Here is what I have so far:\n\n" + response
-        )
+        partial = "I reached the maximum number of steps. Here is what I have so far:\n\n" + response
+        # Still save to history so the agent remembers what was attempted
+        self.session_history.append({
+            "task": prompt,
+            "answer": partial[:500],
+            "tools_used": tools_used,
+        })
+        return partial
 
     # ------------------------------------------------------------------
     # Interactive REPL
@@ -311,10 +389,12 @@ class CodingAgent:
         print(f"   Provider : {self.llm.provider.model_name}")
         print(f"   Repo     : {self.repo_path}")
         print(f"   Max steps: {MAX_ITERATIONS} per task")
+        print(f"   Memory   : enabled (use /clear to reset)")
         print(f"{'─'*60}")
         print("Commands:")
         print("  /index  — Re-index the repository")
         print("  /tools  — List available tools")
+        print("  /clear  — Clear conversation memory")
         print("  /quit   — Exit")
         print(f"{'='*60}\n")
 
@@ -338,8 +418,12 @@ class CodingAgent:
                     print(self.tools.get_tool_descriptions())
                     continue
 
+                if prompt.lower() == "/clear":
+                    self.clear_history()
+                    continue
+
                 if prompt.lower() == "/help":
-                    print("Commands: /index, /tools, /quit")
+                    print("Commands: /index, /tools, /clear, /quit")
                     print("Or type any coding task and the agent will work on it.")
                     continue
 
@@ -347,7 +431,7 @@ class CodingAgent:
                 answer = self.run(prompt)
 
                 print(f"\n{'='*60}")
-                print("💡 Answer:")
+                print(f"💡 Answer: (memory: {len(self.session_history)} task(s))")
                 print(f"{'='*60}\n")
                 print(answer)
                 print()

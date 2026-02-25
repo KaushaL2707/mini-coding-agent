@@ -9,7 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Generator
 
-from config import CHUNK_SIZE, CHUNK_OVERLAP
+from config import (
+    CHUNK_SIZE, CHUNK_OVERLAP,
+    TREESITTER_LANGUAGES, TREESITTER_TARGET_NODES, TREESITTER_CLASS_NODES,
+)
 from tools import (
     should_ignore_path,
     is_supported_file,
@@ -195,21 +198,229 @@ def chunk_by_size(content: str, file_path: str) -> list[CodeChunk]:
     return chunks
 
 
+# ---------------------------------------------------------------------------
+# Tree-sitter chunking (language-aware AST parsing)
+# ---------------------------------------------------------------------------
+
+# Cache for loaded tree-sitter parsers
+_ts_parsers = {}
+_ts_available = None  # None = not checked yet
+
+
+def _is_treesitter_available() -> bool:
+    """Check if tree-sitter is installed."""
+    global _ts_available
+    if _ts_available is None:
+        try:
+            import tree_sitter
+            _ts_available = True
+        except ImportError:
+            _ts_available = False
+    return _ts_available
+
+
+def _get_treesitter_parser(lang_name: str):
+    """
+    Get or create a tree-sitter parser for the given language.
+    Returns (parser, language) or raises ImportError.
+    """
+    if lang_name in _ts_parsers:
+        return _ts_parsers[lang_name]
+
+    import importlib
+    from tree_sitter import Language, Parser
+
+    # Import the language grammar (e.g. tree_sitter_python)
+    module_name = f"tree_sitter_{lang_name}"
+    try:
+        lang_module = importlib.import_module(module_name)
+    except ImportError:
+        raise ImportError(
+            f"Tree-sitter grammar not installed for {lang_name}. "
+            f"Install with: pip install tree-sitter-{lang_name}"
+        )
+
+    language = Language(lang_module.language())
+    parser = Parser(language)
+
+    _ts_parsers[lang_name] = (parser, language)
+    return parser, language
+
+
+def _extract_class_methods(
+    node, content: str, file_path: str, target_types: list
+) -> list[CodeChunk]:
+    """
+    Split a large class node into its individual methods/functions.
+    Also includes the class header (name, decorators, docstring) as a chunk.
+    """
+    chunks = []
+    body = None
+
+    # Find the class body node
+    for child in node.children:
+        if child.type in ("block", "class_body", "declaration_list"):
+            body = child
+            break
+
+    if not body:
+        # No body found — return the whole class as one chunk
+        return []
+
+    # Extract class header (everything before the body)
+    header_content = content[node.start_byte:body.start_byte].rstrip()
+    if header_content.strip():
+        chunks.append(CodeChunk(
+            file_path=file_path,
+            content=header_content,
+            start_line=node.start_point[0] + 1,
+            end_line=body.start_point[0] + 1,
+            chunk_type="class_header",
+        ))
+
+    # Extract each method/function in the body
+    for child in body.children:
+        if child.type in target_types or child.type in (
+            "function_definition", "method_definition", "function_declaration",
+            "method_declaration", "decorated_definition", "function_item",
+        ):
+            child_content = content[child.start_byte:child.end_byte]
+            chunks.append(CodeChunk(
+                file_path=file_path,
+                content=child_content,
+                start_line=child.start_point[0] + 1,
+                end_line=child.end_point[0] + 1,
+                chunk_type=child.type,
+            ))
+
+    return chunks
+
+
+def chunk_with_treesitter(content: str, file_path: str) -> list[CodeChunk] | None:
+    """
+    Parse code with tree-sitter and extract meaningful chunks.
+
+    Returns:
+        List of CodeChunk objects, or None if tree-sitter can't handle this file.
+    """
+    if not _is_treesitter_available():
+        return None
+
+    ext = Path(file_path).suffix.lower()
+    lang_name = TREESITTER_LANGUAGES.get(ext)
+    if not lang_name:
+        return None
+
+    try:
+        parser, language = _get_treesitter_parser(lang_name)
+    except ImportError:
+        return None  # Grammar not installed for this language
+
+    # Parse the source code
+    tree = parser.parse(bytes(content, "utf-8"))
+    root = tree.root_node
+
+    target_types = TREESITTER_TARGET_NODES.get(lang_name, [])
+    if not target_types:
+        return None
+
+    chunks = []
+    block_lines = []  # Accumulate non-target lines (imports, constants, etc.)
+    block_start = 1
+
+    for node in root.children:
+        if node.type in target_types:
+            # Save any accumulated block lines first
+            if block_lines:
+                block_content = "\n".join(block_lines).strip()
+                if block_content:
+                    chunks.append(CodeChunk(
+                        file_path=file_path,
+                        content=block_content,
+                        start_line=block_start,
+                        end_line=node.start_point[0],
+                        chunk_type="block",
+                    ))
+                block_lines = []
+
+            # Extract this function/class as a chunk
+            node_content = content[node.start_byte:node.end_byte]
+
+            # If it's a large class, split into methods
+            if (
+                node.type in TREESITTER_CLASS_NODES
+                and len(node_content) > CHUNK_SIZE * 2
+            ):
+                sub_chunks = _extract_class_methods(
+                    node, content, file_path, target_types
+                )
+                if sub_chunks:
+                    chunks.extend(sub_chunks)
+                    block_start = node.end_point[0] + 2
+                    continue
+
+            chunks.append(CodeChunk(
+                file_path=file_path,
+                content=node_content,
+                start_line=node.start_point[0] + 1,
+                end_line=node.end_point[0] + 1,
+                chunk_type=node.type,
+            ))
+            block_start = node.end_point[0] + 2
+        else:
+            # Non-target node — accumulate as block
+            node_text = content[node.start_byte:node.end_byte]
+            if node_text.strip():
+                block_lines.append(node_text)
+                if not block_lines[:-1]:  # First block line
+                    block_start = node.start_point[0] + 1
+
+    # Save remaining block lines
+    if block_lines:
+        block_content = "\n".join(block_lines).strip()
+        if block_content:
+            chunks.append(CodeChunk(
+                file_path=file_path,
+                content=block_content,
+                start_line=block_start,
+                end_line=len(content.split("\n")),
+                chunk_type="block",
+            ))
+
+    # If tree-sitter produced nothing useful, signal fallback
+    if not chunks:
+        return None
+
+    # Split any remaining oversized chunks by size
+    final_chunks = []
+    for chunk in chunks:
+        if len(chunk.content) > CHUNK_SIZE * 3:
+            final_chunks.extend(chunk_by_size(chunk.content, file_path))
+        else:
+            final_chunks.append(chunk)
+
+    return final_chunks
+
+
 def chunk_code(content: str, file_path: str) -> list[CodeChunk]:
     """
     Intelligently chunk code based on file type.
-    Uses language-specific parsing when available.
+    Tries tree-sitter first, falls back to regex/size-based chunking.
     """
+    # Try tree-sitter first (best quality, multi-language)
+    ts_chunks = chunk_with_treesitter(content, file_path)
+    if ts_chunks:
+        return ts_chunks
+
+    # Fallback: language-specific regex or size-based chunking
     ext = Path(file_path).suffix.lower()
-    
+
     if ext == ".py":
         chunks = extract_python_chunks(content, file_path)
-        # If we only got one big chunk, split it further
         if len(chunks) == 1 and len(chunks[0].content) > CHUNK_SIZE * 2:
             return chunk_by_size(content, file_path)
         return chunks
     else:
-        # Fallback to size-based chunking for other languages
         return chunk_by_size(content, file_path)
 
 

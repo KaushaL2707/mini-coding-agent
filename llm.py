@@ -24,6 +24,11 @@ class LLMProvider(ABC):
         """Generate a response from the LLM."""
         pass
     
+    def generate_stream(self, prompt: str, system_prompt: Optional[str] = None):
+        """Stream tokens one at a time. Override for real streaming."""
+        # Default fallback: yield the entire response at once
+        yield self.generate(prompt, system_prompt)
+    
     @property
     @abstractmethod
     def model_name(self) -> str:
@@ -195,6 +200,65 @@ class OllamaProvider(LLMProvider):
                 f"Error: {e}"
             )
 
+    def generate_stream(self, prompt: str, system_prompt: Optional[str] = None):
+        """Stream tokens from Ollama one at a time."""
+        import urllib.request
+        import json as _json
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        payload = _json.dumps({
+            "model": self._model,
+            "messages": messages,
+            "stream": True,
+            "options": {
+                "temperature": 0.2,
+                "num_predict": 4000,
+            },
+        }).encode("utf-8")
+
+        url = f"{self.base_url}/api/chat"
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                # Ollama streams newline-delimited JSON
+                buffer = b""
+                while True:
+                    chunk = resp.read(1)
+                    if not chunk:
+                        break
+                    buffer += chunk
+                    if chunk == b"\n":
+                        line = buffer.decode("utf-8").strip()
+                        buffer = b""
+                        if not line:
+                            continue
+                        try:
+                            data = _json.loads(line)
+                            token = data.get("message", {}).get("content", "")
+                            if token:
+                                yield token
+                            if data.get("done", False):
+                                break
+                        except _json.JSONDecodeError:
+                            continue
+        except urllib.error.URLError as e:
+            raise ConnectionError(
+                f"Cannot connect to Ollama at {self.base_url}\n"
+                f"Make sure Ollama is installed and running:\n"
+                f"  1. Install: https://ollama.com/download\n"
+                f"  2. Pull a model: ollama pull {self._model}\n"
+                f"  3. It starts automatically, or run: ollama serve\n"
+                f"Error: {e}"
+            )
 
 def get_llm_provider(provider_name: Optional[str] = None) -> LLMProvider:
     """

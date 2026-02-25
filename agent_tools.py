@@ -18,6 +18,7 @@ class Tool:
     description: str
     parameters: dict          # {param_name: "type - description"}
     function: Callable
+    requires_confirmation: bool = False  # If True, ask user before executing
 
 
 class ToolRegistry:
@@ -205,6 +206,7 @@ def create_default_tools() -> ToolRegistry:
             "content": "string - complete file content to write",
         },
         function=tool_write_file,
+        requires_confirmation=True,
     ))
 
     registry.register(Tool(
@@ -212,6 +214,7 @@ def create_default_tools() -> ToolRegistry:
         description="Run a shell command and return stdout/stderr. Timeout: 30s.",
         parameters={"command": "string - shell command to execute"},
         function=tool_run_command,
+        requires_confirmation=True,
     ))
 
     registry.register(Tool(

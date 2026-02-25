@@ -5,6 +5,18 @@ numpy>=1.21.0
 # Vector store (optional - falls back to numpy if not installed)
 faiss-cpu>=1.7.0
 
+# Tree-sitter parsing (optional - falls back to regex chunking)
+# pip install tree-sitter tree-sitter-python tree-sitter-javascript tree-sitter-typescript
+tree-sitter>=0.23.0
+tree-sitter-python>=0.23.0
+# tree-sitter-javascript>=0.23.0
+# tree-sitter-typescript>=0.23.0
+# tree-sitter-go>=0.23.0
+# tree-sitter-rust>=0.23.0
+# tree-sitter-java>=0.23.0
+# tree-sitter-c>=0.23.0
+# tree-sitter-cpp>=0.23.0
+
 # LLM providers (install the one you'll use)
 openai>=1.0.0
 # anthropic>=0.18.0

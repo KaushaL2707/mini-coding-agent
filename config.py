@@ -13,7 +13,12 @@ VECTOR_STORE_DIR = Path(__file__).parent / ".vector_store"
 
 # ============ INGESTION SETTINGS ============
 # File extensions to index
-SUPPORTED_EXTENSIONS = {".py", ".ts", ".js", ".jsx", ".tsx", ".java", ".go", ".rs", ".cpp", ".c", ".h"}
+SUPPORTED_EXTENSIONS = {
+    ".py", ".ts", ".js", ".jsx", ".tsx",
+    ".java", ".go", ".rs",
+    ".cpp", ".c", ".h",
+    ".dart",
+}
 
 # Directories to ignore
 IGNORE_DIRS = {
@@ -38,6 +43,45 @@ MAX_FILE_SIZE = 100 * 1024  # 100 KB
 # Target chunk size (in characters)
 CHUNK_SIZE = 1500
 CHUNK_OVERLAP = 200
+
+# ============ TREE-SITTER SETTINGS ============
+# Map file extensions to tree-sitter language names
+TREESITTER_LANGUAGES = {
+    ".py": "python",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".go": "go",
+    ".rs": "rust",
+    ".c": "c",
+    ".cpp": "cpp",
+    ".h": "c",
+    ".java": "java",
+    ".dart": "dart",
+}
+
+# AST node types to extract as chunks per language
+TREESITTER_TARGET_NODES = {
+    "python": ["function_definition", "class_definition", "decorated_definition"],
+    "javascript": ["function_declaration", "class_declaration", "export_statement",
+                   "lexical_declaration"],
+    "typescript": ["function_declaration", "class_declaration", "interface_declaration",
+                   "type_alias_declaration", "enum_declaration", "export_statement"],
+    "go": ["function_declaration", "method_declaration", "type_declaration"],
+    "rust": ["function_item", "impl_item", "struct_item", "enum_item", "trait_item"],
+    "c": ["function_definition", "struct_specifier", "declaration"],
+    "cpp": ["function_definition", "class_specifier", "struct_specifier"],
+    "java": ["class_declaration", "interface_declaration", "method_declaration"],
+    "dart": ["function_signature", "class_definition", "method_signature",
+             "function_body"],
+}
+
+# Node types that represent classes (may be split into methods if too large)
+TREESITTER_CLASS_NODES = {
+    "class_definition", "class_declaration", "class_specifier",
+    "impl_item", "interface_declaration",
+}
 
 # ============ EMBEDDING SETTINGS ============
 # Embedding model (using sentence-transformers)
