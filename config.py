@@ -48,15 +48,19 @@ EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 TOP_K_CHUNKS = 10
 
 # ============ LLM SETTINGS ============
-# LLM Provider: "openai", "anthropic", or "groq"
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")
+# LLM Provider: "ollama", "openai", "anthropic", or "groq"
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
 
 # Model names per provider
 LLM_MODELS = {
+    "ollama": os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b"),
     "openai": "gpt-4o-mini",
     "anthropic": "claude-3-haiku-20240307",
     "groq": "llama-3.1-8b-instant",
 }
+
+# Ollama settings
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
 # API Keys (from environment)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -64,5 +68,5 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 # ============ AGENT SETTINGS ============
-# Max iterations for agent loop (future use)
-MAX_ITERATIONS = 5
+# Max tool-use steps per agent task
+MAX_ITERATIONS = 10

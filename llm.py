@@ -12,6 +12,7 @@ from config import (
     OPENAI_API_KEY,
     ANTHROPIC_API_KEY,
     GROQ_API_KEY,
+    OLLAMA_BASE_URL,
 )
 
 
@@ -143,12 +144,64 @@ class GroqProvider(LLMProvider):
         return response.choices[0].message.content
 
 
+class OllamaProvider(LLMProvider):
+    """Ollama local LLM provider (no API key needed)."""
+    
+    def __init__(self, base_url: str = "", model: str = ""):
+        self.base_url = (base_url or OLLAMA_BASE_URL).rstrip("/")
+        self._model = model or LLM_MODELS.get("ollama", "qwen2.5-coder:7b")
+    
+    @property
+    def model_name(self) -> str:
+        return f"{self._model} (local)"
+    
+    def generate(self, prompt: str, system_prompt: Optional[str] = None) -> str:
+        import urllib.request
+        import json as _json
+        
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        
+        payload = _json.dumps({
+            "model": self._model,
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "temperature": 0.2,
+                "num_predict": 4000,
+            },
+        }).encode("utf-8")
+        
+        url = f"{self.base_url}/api/chat"
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        
+        try:
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                body = _json.loads(resp.read().decode("utf-8"))
+                return body["message"]["content"]
+        except urllib.error.URLError as e:
+            raise ConnectionError(
+                f"Cannot connect to Ollama at {self.base_url}\n"
+                f"Make sure Ollama is installed and running:\n"
+                f"  1. Install: https://ollama.com/download\n"
+                f"  2. Pull a model: ollama pull {self._model}\n"
+                f"  3. It starts automatically, or run: ollama serve\n"
+                f"Error: {e}"
+            )
+
+
 def get_llm_provider(provider_name: Optional[str] = None) -> LLMProvider:
     """
     Factory function to get the appropriate LLM provider.
     
     Args:
-        provider_name: "openai", "anthropic", or "groq"
+        provider_name: "ollama", "openai", "anthropic", or "groq"
         
     Returns:
         LLMProvider instance
@@ -156,6 +209,7 @@ def get_llm_provider(provider_name: Optional[str] = None) -> LLMProvider:
     name = (provider_name or LLM_PROVIDER).lower()
     
     providers = {
+        "ollama": OllamaProvider,
         "openai": OpenAIProvider,
         "anthropic": AnthropicProvider,
         "groq": GroqProvider,
@@ -183,8 +237,13 @@ When suggesting fixes:
 
 Be concise but thorough. Focus on the specific task at hand."""
     
-    def __init__(self, provider: Optional[LLMProvider] = None):
-        self.provider = provider or get_llm_provider()
+    def __init__(self, provider=None):
+        if isinstance(provider, str):
+            self.provider = get_llm_provider(provider)
+        elif provider is not None:
+            self.provider = provider
+        else:
+            self.provider = get_llm_provider()
         print(f"🤖 Using LLM: {self.provider.model_name}")
     
     def analyze_code(self, code_context: str, user_prompt: str) -> str:

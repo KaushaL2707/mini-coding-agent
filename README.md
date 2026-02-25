@@ -3,7 +3,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 
-A **local, repo-aware coding agent** that indexes your codebase, performs semantic search, and uses LLMs to answer questions and suggest fixes.
+A **local, agentic coding assistant** that indexes your codebase, performs semantic search, and uses LLMs with tools to explore, analyze, and modify code autonomously.
 
 > 🎓 **Built for learning** — understand how real coding agents (like Cursor, Copilot, Cody) work under the hood!
 
@@ -13,12 +13,13 @@ A **local, repo-aware coding agent** that indexes your codebase, performs semant
 
 ## ✨ Features
 
+- 🧠 **Agentic Tool Use** — Thinks step-by-step, reads/writes files, runs commands
 - 📂 **Smart Indexing** — Scans repositories, filters irrelevant files
-- 🧠 **Intelligent Chunking** — Splits code by functions/classes (not arbitrary lines)
 - 🔍 **Semantic Search** — Find code by meaning, not just keywords
-- 🤖 **Multi-LLM Support** — OpenAI, Anthropic Claude, Groq
+- 🤖 **Local LLM Support** — Run with Ollama (default), or use OpenAI, Anthropic, Groq
+- 💸 **No API Keys Needed** — Works fully offline with local models
 - 💾 **Persistent Index** — Re-use embeddings across sessions
-- 🖥️ **CLI & Interactive Mode** — Single queries or REPL
+- 🖥️ **CLI & Interactive Mode** — Single tasks or REPL
 
 ---
 
@@ -26,38 +27,34 @@ A **local, repo-aware coding agent** that indexes your codebase, performs semant
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                         USER PROMPT                          │
-│              "Fix the memory leak in audio.py"              │
+│                         USER TASK                           │
+│              "Fix the bug in auth.py"                       │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                      EMBED PROMPT                            │
-│         Convert question to 384-dim vector                   │
+│               SEMANTIC SEARCH (FAISS)                       │
+│        Embed prompt → find top-K code chunks                 │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
+              ┌───────────────────────────────────┐
+              │    🗨️ THINK (LLM reasons)       │
+              │    🔧 ACT   (call a tool)       │
+         ┌───▶│    👁️ SEE   (observe result)    │
+         │    │    🔁 REPEAT until done        │
+         │    └─────────────────┬─────────────────┘
+         │                  │
+         │    Tools:        │
+         │    • read_file    │
+         │    • write_file   │
+         └─── • run_command  │
+              • search_code  │
+              • list_dir     │
+                             ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                    VECTOR SEARCH (FAISS)                     │
-│         Find top-K most similar code chunks                  │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                      BUILD CONTEXT                           │
-│         Combine relevant code with user prompt               │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                        LLM ANALYSIS                          │
-│         GPT-4 / Claude / Llama analyzes and responds         │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                     SUGGESTED FIX / DIFF                     │
-│         Actionable code changes in diff format               │
+│                      FINAL ANSWER                           │
+│        Explanation + code changes applied                    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -67,12 +64,13 @@ A **local, repo-aware coding agent** that indexes your codebase, performs semant
 
 ```
 mini_coding_agent/
-├── agent.py         # 🎯 Main orchestrator + CLI
+├── agent.py         # 🎯 Agentic loop (ReAct) + CLI
+├── agent_tools.py   # 🔧 Tool definitions (read, write, run, list)
 ├── ingest.py        # 📂 Repo scanning + code chunking
 ├── embed.py         # 🧮 Embeddings + FAISS vector store
 ├── retrieve.py      # 🔍 Semantic search
-├── llm.py           # 🤖 LLM wrapper (OpenAI/Anthropic/Groq)
-├── tools.py         # 🔧 Filesystem utilities
+├── llm.py           # 🤖 LLM wrapper (Ollama/OpenAI/Anthropic/Groq)
+├── tools.py         # 🛠️ Filesystem utilities
 ├── config.py        # ⚙️ Configuration settings
 └── requirements.txt # 📦 Dependencies
 ```
@@ -95,11 +93,25 @@ source venv/bin/activate  # Windows: .\venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. Set API Key
+### 2. Set Up LLM
+
+#### Option A: Local LLM with Ollama (Recommended — Free & Offline)
 
 ```bash
-# OpenAI (default)
+# Install Ollama: https://ollama.com/download
+# Then pull a coding model:
+ollama pull qwen2.5-coder:7b
+
+# That's it! No API keys needed.
+# Ollama runs automatically in the background.
+```
+
+#### Option B: Cloud Providers
+
+```bash
+# OpenAI
 export OPENAI_API_KEY="sk-..."
+export LLM_PROVIDER="openai"
 
 # OR Anthropic
 export ANTHROPIC_API_KEY="..."
@@ -165,7 +177,14 @@ python agent.py --repo . --reindex --prompt "what changed in the API?"
 ### Use Different LLM Providers
 
 ```bash
-# Fast inference with Groq
+# Default: local Ollama (no setup needed beyond install)
+python agent.py -r . -p "explain this function"
+
+# Use a different local model
+set OLLAMA_MODEL=deepseek-coder-v2:16b
+python agent.py -r . -p "find all bugs"
+
+# Fast cloud inference with Groq
 python agent.py -r . --provider groq -p "explain this function"
 
 # Claude for complex analysis
@@ -178,14 +197,14 @@ python agent.py -r . --provider anthropic -p "find all bugs"
 
 Edit `config.py` to customize behavior:
 
-| Setting | Description | Default |
-|---------|-------------|---------|
-| `SUPPORTED_EXTENSIONS` | File types to index | `.py`, `.ts`, `.js`, `.go`, etc. |
-| `IGNORE_DIRS` | Directories to skip | `node_modules`, `.git`, `venv` |
-| `CHUNK_SIZE` | Target chunk size (chars) | `1500` |
-| `CHUNK_OVERLAP` | Overlap between chunks | `200` |
-| `TOP_K_CHUNKS` | Chunks to retrieve per query | `10` |
-| `EMBEDDING_MODEL` | Sentence transformer model | `all-MiniLM-L6-v2` |
+| Setting                | Description                  | Default                          |
+| ---------------------- | ---------------------------- | -------------------------------- |
+| `SUPPORTED_EXTENSIONS` | File types to index          | `.py`, `.ts`, `.js`, `.go`, etc. |
+| `IGNORE_DIRS`          | Directories to skip          | `node_modules`, `.git`, `venv`   |
+| `CHUNK_SIZE`           | Target chunk size (chars)    | `1500`                           |
+| `CHUNK_OVERLAP`        | Overlap between chunks       | `200`                            |
+| `TOP_K_CHUNKS`         | Chunks to retrieve per query | `10`                             |
+| `EMBEDDING_MODEL`      | Sentence transformer model   | `all-MiniLM-L6-v2`               |
 
 ---
 
@@ -194,6 +213,7 @@ Edit `config.py` to customize behavior:
 ### Chunking Strategy
 
 **Python files**: Parsed by function/class boundaries
+
 ```python
 # This becomes ONE chunk:
 def authenticate_user(token: str) -> User:
@@ -221,7 +241,6 @@ When suggesting fixes:
 3. Consider edge cases and side effects
 """
 ```
-
 
 <p align="center">
   <b>⭐ Star this repo if you learned something!</b>
