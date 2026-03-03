@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from config import TOP_K_CHUNKS, MAX_ITERATIONS
+from config import TOP_K_CHUNKS, MAX_ITERATIONS, MAX_CONTEXT_CHARS, MAX_TOOL_OUTPUT_CHARS, VECTOR_STORE_DIR
 from embed import VectorStore, index_repository
 from retrieve import CodeRetriever
 from llm import LLM
@@ -53,7 +53,8 @@ FINAL_ANSWER: <your complete, detailed answer to the user>
 - When modifying code, ALWAYS read the file first to see its current state.
 - You can only use ONE tool per step. Wait for the result before deciding the next step.
 - Be thorough: explore the code before making changes.
-- When writing code changes, include the COMPLETE file content in write_file, not just the diff.
+- PREFER edit_file over write_file when modifying existing files. Only use write_file for creating new files.
+- When using edit_file, copy the exact text from the file (use read_file first) as old_text — whitespace and indentation must match exactly.
 
 ## Repository Info
 Working directory: {repo_path}
@@ -84,12 +85,13 @@ class CodingAgent:
         self.llm = LLM(provider=llm_provider)
         self.indexed = False
 
-        # Conversation memory (persists across tasks in a session)
+        # Conversation memory (persisted to disk across sessions)
         self.session_history = []  # [{"task": str, "answer": str, "tools_used": [str]}]
         self.max_history_chars = 6000  # Keep history within model context limits
+        self._load_history()
 
         # Set up tools
-        self.tools = create_default_tools()
+        self.tools = create_default_tools(repo_path=self.repo_path)
 
         # Register search_code tool (it needs the retriever)
         self.tools.register(Tool(
@@ -125,7 +127,7 @@ class CodingAgent:
             summary += f"**Agent answer:** {answer}\n---\n"
 
             if total_chars + len(summary) > self.max_history_chars:
-                break
+                continue
             parts.insert(1, summary)  # Insert after header, keeping chronological order
             total_chars += len(summary)
 
@@ -134,10 +136,88 @@ class CodingAgent:
 
         return "\n".join(parts)
 
+    @property
+    def _history_path(self) -> Path:
+        """Path to the session history JSON file."""
+        return VECTOR_STORE_DIR / self.index_name / "session_history.json"
+
+    def _save_history(self):
+        """Persist session history to disk."""
+        path = self._history_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.session_history, f, indent=2)
+
+    def _load_history(self):
+        """Load session history from disk if it exists."""
+        path = self._history_path
+        if path.exists():
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    self.session_history = json.load(f)
+                if self.session_history:
+                    print(f"📜 Loaded {len(self.session_history)} previous task(s) from history")
+            except (json.JSONDecodeError, OSError):
+                self.session_history = []
+
     def clear_history(self):
-        """Clear the conversation history."""
+        """Clear the conversation history (both in-memory and on disk)."""
         self.session_history.clear()
+        path = self._history_path
+        if path.exists():
+            path.unlink()
         print("🧹 Conversation history cleared.")
+
+    # ------------------------------------------------------------------
+    # Conversation context management
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _truncate_output(text: str, limit: int = MAX_TOOL_OUTPUT_CHARS) -> str:
+        """Truncate tool output that exceeds the limit."""
+        if len(text) <= limit:
+            return text
+        half = limit // 2
+        return (
+            text[:half]
+            + f"\n\n... [truncated {len(text) - limit:,} chars] ...\n\n"
+            + text[-half:]
+        )
+
+    @staticmethod
+    def _build_prompt(preamble: str, exchanges: list[dict], budget: int = MAX_CONTEXT_CHARS) -> str:
+        """
+        Assemble the conversation prompt from a preamble and list of exchanges,
+        keeping the most recent exchanges that fit within the character budget.
+
+        Args:
+            preamble: The user task + history context (always included).
+            exchanges: List of {"role": str, "content": str} entries representing
+                       assistant responses and observations.
+            budget: Maximum total character count for the prompt.
+
+        Returns:
+            The assembled prompt string.
+        """
+        budget_remaining = budget - len(preamble)
+
+        # Walk exchanges from newest to oldest, collecting those that fit
+        kept = []
+        for entry in reversed(exchanges):
+            text = f"\n\n{entry['role']}:\n{entry['content']}"
+            if len(text) <= budget_remaining:
+                kept.append(text)
+                budget_remaining -= len(text)
+            else:
+                break  # Once one doesn't fit, drop all older ones too
+
+        # Build the prompt: preamble + kept exchanges in chronological order
+        dropped = len(exchanges) - len(kept)
+        parts = [preamble]
+        if dropped > 0:
+            parts.append(f"\n\n[... {dropped} earlier message(s) omitted for context limit ...]")
+        parts.extend(reversed(kept))
+        return "".join(parts)
 
     # ------------------------------------------------------------------
     # Indexing
@@ -191,6 +271,8 @@ class CodingAgent:
         # Check for FINAL_ANSWER
         if "FINAL_ANSWER:" in response:
             answer = response.split("FINAL_ANSWER:", 1)[1].strip()
+            # Strip leaked THOUGHT/THINKING prefixes from the answer
+            answer = re.sub(r"^(?:THOUGHTS?|THINKING)\s*:?\s*", "", answer, flags=re.IGNORECASE)
             return ("answer", answer, None)
 
         # Check for ACTION + ACTION_INPUT
@@ -276,16 +358,21 @@ class CodingAgent:
         # Include conversation history for follow-up awareness
         history_context = self._build_history_context()
         if history_context:
-            conversation = f"{history_context}\n\nCurrent task: {prompt}"
+            preamble = f"{history_context}\n\nCurrent task: {prompt}"
         else:
-            conversation = f"User task: {prompt}"
+            preamble = f"User task: {prompt}"
 
+        exchanges = []  # List of {"role": str, "content": str}
         tools_used = []  # Track tools used in this task
+        last_tool_call = None  # (tool_name, args) to detect repeated calls
 
         for step in range(1, MAX_ITERATIONS + 1):
             print(f"\n{'─'*60}")
             print(f"🔄 Step {step}/{MAX_ITERATIONS}")
             print(f"{'─'*60}")
+
+            # Build the prompt with context management
+            conversation = self._build_prompt(preamble, exchanges)
 
             # Stream LLM response (tokens appear in real-time)
             response = ""
@@ -308,9 +395,28 @@ class CodingAgent:
                     "answer": value,
                     "tools_used": tools_used,
                 })
+                self._save_history()
                 return value
 
             elif result_type == "action":
+                # Detect repeated identical tool calls (model stuck in a loop)
+                current_call = (value, json.dumps(args, sort_keys=True))
+                if current_call == last_tool_call:
+                    print(f"⚠️ Duplicate tool call detected — nudging model forward")
+                    exchanges.append({"role": "Assistant", "content": response})
+                    exchanges.append({
+                        "role": "System",
+                        "content": (
+                            f"You already called {value} with the same arguments in the previous step. "
+                            f"The result is already in the conversation above. "
+                            f"Do NOT call {value} again. Instead, proceed with the NEXT step of the task: "
+                            f"use a DIFFERENT tool (like edit_file) or give your FINAL_ANSWER."
+                        ),
+                    })
+                    last_tool_call = None  # Reset to allow one more attempt
+                    continue
+                last_tool_call = current_call
+
                 # Show tool call
                 args_display = json.dumps(args, indent=2) if args else "{}"
                 print(f"🔧 Tool: {value}({args_display})")
@@ -320,7 +426,16 @@ class CodingAgent:
                 tool = self.tools.get(value)
                 if tool and tool.requires_confirmation:
                     # Show what's about to happen
-                    if value == "write_file":
+                    if value == "edit_file":
+                        print(f"⚠️  About to edit: {args.get('path', '?')}")
+                        old = args.get('old_text', '')
+                        new = args.get('new_text', '')
+                        # Show a unified diff preview
+                        for line in old.splitlines():
+                            print(f"   \033[91m- {line}\033[0m")
+                        for line in new.splitlines():
+                            print(f"   \033[92m+ {line}\033[0m")
+                    elif value == "write_file":
                         print(f"⚠️  About to write to: {args.get('path', '?')}")
                     elif value == "run_command":
                         print(f"⚠️  About to run: {args.get('command', '?')}")
@@ -331,18 +446,22 @@ class CodingAgent:
                         confirm = "n"
 
                     if confirm not in ("y", "yes"):
-                        tool_result = f"User declined this action."
                         print("   ❌ Declined")
-
-                        conversation += (
-                            f"\n\nAssistant:\n{response}"
-                            f"\n\nObservation: User declined the {value} action. "
-                            f"Find an alternative approach or provide your FINAL_ANSWER with the suggested changes instead."
-                        )
+                        exchanges.append({"role": "Assistant", "content": response})
+                        exchanges.append({
+                            "role": "Observation",
+                            "content": (
+                                f"User declined the {value} action. "
+                                f"Find an alternative approach or provide your FINAL_ANSWER with the suggested changes instead."
+                            ),
+                        })
                         continue
 
                 # Execute the tool
                 tool_result = self.tools.execute(value, args)
+
+                # Truncate large tool output to stay within context budget
+                tool_result = self._truncate_output(tool_result)
 
                 # Show truncated result
                 preview = tool_result[:300]
@@ -350,21 +469,28 @@ class CodingAgent:
                     preview += f"... [{len(tool_result)} chars total]"
                 print(f"📋 Result:\n{preview}")
 
-                # Append the full exchange to conversation
-                conversation += (
-                    f"\n\nAssistant:\n{response}"
-                    f"\n\nObservation (result of {value}):\n{tool_result}"
-                    f"\n\nContinue. Decide your next step: use another tool or give your FINAL_ANSWER."
-                )
+                # Append the exchange
+                exchanges.append({"role": "Assistant", "content": response})
+                exchanges.append({
+                    "role": f"Observation (result of {value})",
+                    "content": tool_result,
+                })
+                exchanges.append({
+                    "role": "System",
+                    "content": "Continue. Decide your next step: use another tool or give your FINAL_ANSWER.",
+                })
 
             elif result_type == "error":
                 print(f"⚠️ {value}")
-                conversation += (
-                    f"\n\nAssistant:\n{response}"
-                    f"\n\nSystem: {value}. Please use the correct format:\n"
-                    f"THOUGHT: ...\nACTION: tool_name\nACTION_INPUT: {{...}}\n"
-                    f"or\nTHOUGHT: ...\nFINAL_ANSWER: ..."
-                )
+                exchanges.append({"role": "Assistant", "content": response})
+                exchanges.append({
+                    "role": "System",
+                    "content": (
+                        f"{value}. Please use the correct format:\n"
+                        f"THOUGHT: ...\nACTION: tool_name\nACTION_INPUT: {{...}}\n"
+                        f"or\nTHOUGHT: ...\nFINAL_ANSWER: ..."
+                    ),
+                })
 
         # Exhausted iterations
         print(f"\n⚠️ Reached max steps ({MAX_ITERATIONS})")
@@ -375,6 +501,7 @@ class CodingAgent:
             "answer": partial[:500],
             "tools_used": tools_used,
         })
+        self._save_history()
         return partial
 
     # ------------------------------------------------------------------

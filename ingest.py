@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Generator
 
 from config import (
-    CHUNK_SIZE, CHUNK_OVERLAP,
+    CHUNK_SIZE, CHUNK_OVERLAP, IGNORE_DIRS,
     TREESITTER_LANGUAGES, TREESITTER_TARGET_NODES, TREESITTER_CLASS_NODES,
 )
 from tools import (
@@ -47,7 +47,7 @@ def load_files(repo_path: str) -> Generator[tuple[Path, str, str], None, None]:
     
     for root, dirs, filenames in os.walk(repo):
         # Modify dirs in-place to skip ignored directories
-        dirs[:] = [d for d in dirs if d not in {"node_modules", ".git", "venv", ".venv", "__pycache__", ".pytest_cache", "dist", "build", ".next", "target", ".idea", ".vscode"}]
+        dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
         
         for name in filenames:
             file_path = Path(root) / name
@@ -371,9 +371,9 @@ def chunk_with_treesitter(content: str, file_path: str) -> list[CodeChunk] | Non
             # Non-target node — accumulate as block
             node_text = content[node.start_byte:node.end_byte]
             if node_text.strip():
-                block_lines.append(node_text)
-                if not block_lines[:-1]:  # First block line
+                if not block_lines:  # First block line
                     block_start = node.start_point[0] + 1
+                block_lines.append(node_text)
 
     # Save remaining block lines
     if block_lines:

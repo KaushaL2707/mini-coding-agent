@@ -7,8 +7,11 @@ The agent decides which tools to call based on the user's task.
 import os
 import subprocess
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Callable
+
+from config import MAX_FILE_SIZE
 
 
 @dataclass
@@ -68,8 +71,8 @@ def tool_read_file(path: str) -> str:
             return f"Error: File '{path}' does not exist."
         if not p.is_file():
             return f"Error: '{path}' is not a file."
-        if p.stat().st_size > 100 * 1024:
-            return f"Error: File too large ({p.stat().st_size:,} bytes). Max 100 KB."
+        if p.stat().st_size > MAX_FILE_SIZE:
+            return f"Error: File too large ({p.stat().st_size:,} bytes). Max {MAX_FILE_SIZE // 1024} KB."
 
         for encoding in ["utf-8", "utf-8-sig", "latin-1"]:
             try:
@@ -101,7 +104,59 @@ def tool_write_file(path: str, content: str) -> str:
         return f"Error writing file: {e}"
 
 
-def tool_run_command(command: str) -> str:
+def tool_edit_file(path: str, old_text: str, new_text: str) -> str:
+    """Find and replace a specific text block in a file."""
+    try:
+        p = Path(path)
+        if not p.exists():
+            return f"Error: File '{path}' does not exist."
+        if not p.is_file():
+            return f"Error: '{path}' is not a file."
+
+        # Read current content
+        content = None
+        for encoding in ["utf-8", "utf-8-sig", "latin-1"]:
+            try:
+                content = p.read_text(encoding=encoding)
+                break
+            except UnicodeDecodeError:
+                continue
+        if content is None:
+            return f"Error: Could not decode file '{path}'."
+
+        # Count occurrences
+        count = content.count(old_text)
+        if count == 0:
+            # Show a helpful snippet of the file so the LLM can retry
+            preview = content[:500]
+            return (
+                f"Error: old_text not found in '{path}'. "
+                f"Make sure it matches the file EXACTLY (whitespace, indentation, etc.).\n"
+                f"File preview:\n{preview}"
+            )
+        if count > 1:
+            return (
+                f"Error: old_text appears {count} times in '{path}'. "
+                f"Include more surrounding context to make the match unique."
+            )
+
+        # Apply the edit
+        new_content = content.replace(old_text, new_text, 1)
+        p.write_text(new_content, encoding="utf-8")
+
+        # Build a simple diff summary
+        old_lines = old_text.strip().splitlines()
+        new_lines = new_text.strip().splitlines()
+        return (
+            f"Edited {path}: replaced {len(old_lines)} line(s) with {len(new_lines)} line(s).\n"
+            f"  - Removed: {old_lines[0][:80]}{'...' if len(old_lines[0]) > 80 else ''}\n"
+            f"  + Added:   {new_lines[0][:80]}{'...' if len(new_lines[0]) > 80 else ''}"
+        )
+    except Exception as e:
+        return f"Error editing file: {e}"
+
+
+def tool_run_command(command: str, repo_path: str = ".") -> str:
     """Run a shell command and return its output."""
     try:
         result = subprocess.run(
@@ -110,7 +165,7 @@ def tool_run_command(command: str) -> str:
             capture_output=True,
             text=True,
             timeout=30,
-            cwd=os.getcwd(),
+            cwd=repo_path,
         )
         output_parts = []
         if result.stdout:
@@ -187,8 +242,12 @@ def tool_list_directory(path: str = ".") -> str:
 # Registry factory
 # ---------------------------------------------------------------------------
 
-def create_default_tools() -> ToolRegistry:
-    """Create the default set of agent tools."""
+def create_default_tools(repo_path: str = ".") -> ToolRegistry:
+    """Create the default set of agent tools.
+
+    Args:
+        repo_path: Repository root path, used as cwd for run_command.
+    """
     registry = ToolRegistry()
 
     registry.register(Tool(
@@ -200,7 +259,7 @@ def create_default_tools() -> ToolRegistry:
 
     registry.register(Tool(
         name="write_file",
-        description="Create or overwrite a file with the given content.",
+        description="Create a NEW file or fully overwrite an existing file. For modifying specific parts of a file, use edit_file instead.",
         parameters={
             "path": "string - file path to write",
             "content": "string - complete file content to write",
@@ -210,10 +269,22 @@ def create_default_tools() -> ToolRegistry:
     ))
 
     registry.register(Tool(
+        name="edit_file",
+        description="Make a surgical edit to a file by replacing a specific text block. PREFERRED over write_file for modifying existing files — only changes what you specify, leaving the rest untouched. The old_text must match EXACTLY (whitespace included) and appear only once in the file.",
+        parameters={
+            "path": "string - file path to edit",
+            "old_text": "string - exact text to find (must be unique in the file)",
+            "new_text": "string - replacement text",
+        },
+        function=tool_edit_file,
+        requires_confirmation=True,
+    ))
+
+    registry.register(Tool(
         name="run_command",
         description="Run a shell command and return stdout/stderr. Timeout: 30s.",
         parameters={"command": "string - shell command to execute"},
-        function=tool_run_command,
+        function=partial(tool_run_command, repo_path=repo_path),
         requires_confirmation=True,
     ))
 

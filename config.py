@@ -114,3 +114,11 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 # ============ AGENT SETTINGS ============
 # Max tool-use steps per agent task
 MAX_ITERATIONS = 10
+
+# Max characters for the conversation prompt sent to the LLM.
+# Older exchanges are dropped (most recent kept) to stay within budget.
+# ~30k chars ≈ ~7,500 tokens — safe for most models including 8k-context ones.
+MAX_CONTEXT_CHARS = 30_000
+
+# Max characters for a single tool output before truncation.
+MAX_TOOL_OUTPUT_CHARS = 10_000

@@ -70,8 +70,30 @@ class OpenAIProvider(LLMProvider):
             temperature=0.2,
             max_tokens=4000,
         )
-        
+
         return response.choices[0].message.content
+
+    def generate_stream(self, prompt: str, system_prompt: Optional[str] = None):
+        """Stream tokens from OpenAI."""
+        self._ensure_client()
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        stream = self.client.chat.completions.create(
+            model=self._model,
+            messages=messages,
+            temperature=0.2,
+            max_tokens=4000,
+            stream=True,
+        )
+
+        for chunk in stream:
+            delta = chunk.choices[0].delta
+            if delta.content:
+                yield delta.content
 
 
 class AnthropicProvider(LLMProvider):
@@ -107,8 +129,25 @@ class AnthropicProvider(LLMProvider):
             kwargs["system"] = system_prompt
         
         response = self.client.messages.create(**kwargs)
-        
+
         return response.content[0].text
+
+    def generate_stream(self, prompt: str, system_prompt: Optional[str] = None):
+        """Stream tokens from Anthropic."""
+        self._ensure_client()
+
+        kwargs = {
+            "model": self._model,
+            "max_tokens": 4000,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+
+        if system_prompt:
+            kwargs["system"] = system_prompt
+
+        with self.client.messages.stream(**kwargs) as stream:
+            for text in stream.text_stream:
+                yield text
 
 
 class GroqProvider(LLMProvider):
@@ -145,8 +184,30 @@ class GroqProvider(LLMProvider):
             temperature=0.2,
             max_tokens=4000,
         )
-        
+
         return response.choices[0].message.content
+
+    def generate_stream(self, prompt: str, system_prompt: Optional[str] = None):
+        """Stream tokens from Groq."""
+        self._ensure_client()
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        stream = self.client.chat.completions.create(
+            model=self._model,
+            messages=messages,
+            temperature=0.2,
+            max_tokens=4000,
+            stream=True,
+        )
+
+        for chunk in stream:
+            delta = chunk.choices[0].delta
+            if delta.content:
+                yield delta.content
 
 
 class OllamaProvider(LLMProvider):

@@ -195,7 +195,14 @@ class VectorStore:
                 self.index = faiss.read_index(str(index_path))
             except ImportError:
                 print("⚠️ FAISS not available, using numpy search")
-                self._init_faiss_index(self.embeddings.shape[1] if self.embeddings is not None else 384)
+                self.index = None
+        elif self.embeddings is not None:
+            # index.faiss missing but embeddings exist — rebuild the index
+            self._init_faiss_index(self.embeddings.shape[1])
+            if self.index is not None:
+                import faiss
+                self.index.add(self.embeddings.astype(np.float32))
+                print("🔄 Rebuilt FAISS index from embeddings")
         
         print(f"📂 Loaded {len(self.chunks)} chunks from {load_path}")
         return True
